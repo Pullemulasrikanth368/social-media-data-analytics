@@ -1,6 +1,7 @@
 from copy import deepcopy
 from datetime import datetime, timezone
 import logging
+import threading
 
 from django.conf import settings
 from pymongo import MongoClient
@@ -28,6 +29,23 @@ db = client["linkedin_db"]
 
 analytics_collection = db["analytics"]
 tokens_collection = db["tokens"]
+dashboard_cache_collection = db["dashboard_cache"]
+
+
+def _ensure_indexes():
+    """Create indexes needed by the read/write paths. Idempotent and best-effort:
+    a MongoDB outage at import time must not crash Django startup."""
+    specs = [
+        (analytics_collection, [("organization_id", 1), ("date", 1)], {}),
+        (analytics_collection, [("date", 1)], {}),
+        (tokens_collection, [("created_at", -1)], {}),
+        (dashboard_cache_collection, [("start", 1), ("end", 1), ("granularity", 1)], {"unique": True}),
+    ]
+    for collection, keys, opts in specs:
+        try:
+            collection.create_index(keys, **opts)
+        except Exception:
+            logger.exception("Could not create MongoDB index on %s %s", collection.name, keys)
 
 
 def _utcnow():
@@ -63,6 +81,17 @@ def get_latest_access_token():
     if not token_doc:
         return None
     return token_doc.get("access_token")
+
+
+def get_latest_refresh_token():
+    token_doc = _collection("tokens").find_one(
+        {"refresh_token": {"$exists": True, "$nin": [None, "", "your_refresh_token"]}},
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    if not token_doc:
+        return None
+    return token_doc.get("refresh_token")
 
 
 def _latest_before_today(organization_id, today):
@@ -250,54 +279,200 @@ def get_latest_analytics():
     return _collection("analytics").find_one({}, {"_id": 0}, sort=[("date", -1)])
 
 
-def get_dashboard_analytics(start_date=None, end_date=None):
-    if not start_date or not end_date:
-        default_start, default_end = default_date_range()
-        start_date = start_date or default_start.isoformat()
-        end_date = end_date or default_end.isoformat()
+def _dedupe_audience_rows(rows):
+    """Keep one row per (segment_type, segment); later rows win."""
+    deduped = {}
+    for row in rows:
+        key = (row.get("segment_type", ""), row.get("segment", ""))
+        deduped[key] = row
+    return list(deduped.values())
 
+
+def _dedupe_post_rows(rows):
+    """Keep one row per postId; later rows win."""
+    deduped = {}
+    for row in rows:
+        deduped[str(row.get("postId") or row.get("post_id") or id(row))] = row
+    return list(deduped.values())
+
+
+def _dashboard_payload(organization_id, start_date, end_date, daily_rows, audience_rows,
+                       post_rows, comparisons, performance_insights, followers, snapshots):
+    overview = aggregate_metrics(daily_rows)
+    overview["followers"] = followers
+    overview["organization_id"] = organization_id
+    return {
+        "organization_id": organization_id,
+        "start_date": parse_date(start_date).isoformat(),
+        "end_date": parse_date(end_date).isoformat(),
+        "overview": overview,
+        "comparisons": comparisons,
+        "performance_insights": performance_insights,
+        "daily_metrics": daily_rows,
+        "audience_analytics": audience_rows,
+        "post_analytics": post_rows,
+        "dashboard_rows": build_dashboard_rows(daily_rows, audience_rows, post_rows, end_date),
+        "snapshots": snapshots,
+    }
+
+
+def _cache_key(start_date, end_date, granularity):
+    return {"start": start_date, "end": end_date, "granularity": granularity}
+
+
+def _get_cached_dashboard(start_date, end_date, granularity, ttl_seconds, allow_stale=False):
+    collection = _collection("dashboard_cache")
+    if not hasattr(collection, "find_one"):
+        return None
+    doc = collection.find_one({**_cache_key(start_date, end_date, granularity)}, {"_id": 0})
+    if not doc:
+        return None
+    payload = doc.get("payload")
+    if allow_stale:
+        return payload
+    built_at = doc.get("built_at")
+    if not built_at:
+        return None
+    # pymongo returns naive UTC datetimes by default; make the comparison tz-safe.
+    if built_at.tzinfo is None:
+        built_at = built_at.replace(tzinfo=timezone.utc)
+    if (_utcnow() - built_at).total_seconds() > ttl_seconds:
+        return None
+    return payload
+
+
+def _store_cached_dashboard(start_date, end_date, granularity, payload):
+    collection = _collection("dashboard_cache")
+    if not hasattr(collection, "update_one"):
+        return
+    collection.update_one(
+        {**_cache_key(start_date, end_date, granularity)},
+        {"$set": {**_cache_key(start_date, end_date, granularity),
+                  "built_at": _utcnow(), "payload": payload}},
+        upsert=True,
+    )
+
+
+def _dashboard_from_fresh(data, start_date, end_date):
+    """Build a dashboard payload from a single freshly collected analytics doc.
+
+    Because it comes from one collection run there is no cross-snapshot
+    duplication of audience/post rows.
+    """
+    organization_id = data.get("organization_id") or ""
+    daily_rows = _add_organization_id(
+        rows_between(data.get("daily_metrics", []), start_date, end_date), organization_id)
+    audience_rows = _canonical_audience_rows(
+        data.get("audience_analytics", []), organization_id, data.get("date") or end_date)
+    post_rows = _add_organization_id(
+        _canonical_post_rows(data.get("post_analytics", [])), organization_id)
+    return _dashboard_payload(
+        organization_id, start_date, end_date, daily_rows, audience_rows, post_rows,
+        data.get("comparisons") or build_comparisons(daily_rows),
+        data.get("performance_insights", {}),
+        data.get("followers", 0),
+        snapshots=[],
+    )
+
+
+def _dashboard_from_storage(start_date, end_date):
+    """Fallback path: assemble the dashboard from already-stored snapshots."""
     latest = get_latest_analytics() or {}
     historical = get_all_analytics(start_date, end_date)
 
     daily_rows = []
     audience_rows = []
     post_rows = []
-
     for snapshot in historical or [latest]:
         organization_id = snapshot.get("organization_id") or latest.get("organization_id") or ""
         daily_rows.extend(_add_organization_id(
-            rows_between(snapshot.get("daily_metrics", []), start_date, end_date),
-            organization_id,
-        ))
+            rows_between(snapshot.get("daily_metrics", []), start_date, end_date), organization_id))
         audience_rows.extend(_canonical_audience_rows(
-            snapshot.get("audience_analytics", []),
-            organization_id,
-            snapshot.get("date") or end_date,
-        ))
+            snapshot.get("audience_analytics", []), organization_id, snapshot.get("date") or end_date))
         post_rows.extend(_add_organization_id(
-            _canonical_post_rows(snapshot.get("post_analytics", [])),
-            organization_id,
-        ))
+            _canonical_post_rows(snapshot.get("post_analytics", [])), organization_id))
+
+    audience_rows = _dedupe_audience_rows(audience_rows)
+    post_rows = _dedupe_post_rows(post_rows)
 
     if not audience_rows:
         logger.warning("Dashboard analytics response has no audience_analytics rows")
     if not post_rows:
         logger.warning("Dashboard analytics response has empty post_analytics")
 
-    overview = aggregate_metrics(daily_rows)
-    overview["followers"] = latest.get("followers", 0)
-    overview["organization_id"] = latest.get("organization_id", "")
+    return _dashboard_payload(
+        latest.get("organization_id", ""), start_date, end_date, daily_rows, audience_rows, post_rows,
+        build_comparisons(daily_rows), latest.get("performance_insights", {}),
+        latest.get("followers", 0), snapshots=historical,
+    )
 
-    return {
-        "organization_id": latest.get("organization_id", ""),
-        "start_date": parse_date(start_date).isoformat(),
-        "end_date": parse_date(end_date).isoformat(),
-        "overview": overview,
-        "comparisons": build_comparisons(daily_rows),
-        "performance_insights": latest.get("performance_insights", {}),
-        "daily_metrics": daily_rows,
-        "audience_analytics": audience_rows,
-        "post_analytics": post_rows,
-        "dashboard_rows": build_dashboard_rows(daily_rows, audience_rows, post_rows, end_date),
-        "snapshots": historical,
-    }
+
+_fetch_locks = {}
+_fetch_locks_guard = threading.Lock()
+
+
+def _fetch_lock(key):
+    with _fetch_locks_guard:
+        lock = _fetch_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _fetch_locks[key] = lock
+        return lock
+
+
+def _best_available_dashboard(start_date, end_date, granularity, ttl_seconds):
+    """Serve the freshest thing we have without hitting LinkedIn: a stale cache
+    entry if present, otherwise whatever is already stored in MongoDB."""
+    stale = _get_cached_dashboard(start_date, end_date, granularity, ttl_seconds, allow_stale=True)
+    if stale is not None:
+        return stale
+    return _dashboard_from_storage(start_date, end_date)
+
+
+def get_dashboard_analytics(start_date=None, end_date=None, granularity="DAY"):
+    if not start_date or not end_date:
+        default_start, default_end = default_date_range()
+        start_date = start_date or default_start.isoformat()
+        end_date = end_date or default_end.isoformat()
+
+    start_date = parse_date(start_date).isoformat()
+    end_date = parse_date(end_date).isoformat()
+
+    live_fetch = getattr(settings, "DASHBOARD_LIVE_FETCH", True)
+    ttl_seconds = int(getattr(settings, "DASHBOARD_CACHE_TTL_SECONDS", 6 * 3600))
+
+    if not live_fetch:
+        return _dashboard_from_storage(start_date, end_date)
+
+    cached = _get_cached_dashboard(start_date, end_date, granularity, ttl_seconds)
+    if cached is not None:
+        return cached
+
+    # Prevent a cache stampede: BI tools (Looker Studio) fire several concurrent
+    # requests for the same window. Only one thread should hit LinkedIn; the
+    # others serve the best already-available data instead of piling on duplicate
+    # fetches (which also burn LinkedIn's privacy budget).
+    key = f"{start_date}|{end_date}|{granularity}"
+    lock = _fetch_lock(key)
+    if not lock.acquire(blocking=False):
+        logger.info("Dashboard fetch already in progress for %s; serving cached/stored data", key)
+        return _best_available_dashboard(start_date, end_date, granularity, ttl_seconds)
+
+    try:
+        # Re-check: another thread may have populated the cache while we waited.
+        cached = _get_cached_dashboard(start_date, end_date, granularity, ttl_seconds)
+        if cached is not None:
+            return cached
+
+        from .analytics_sync import collect_linkedin_analytics
+
+        data = collect_linkedin_analytics(start_date, end_date, granularity)
+        save_analytics(data)
+        payload = _dashboard_from_fresh(data, start_date, end_date)
+        _store_cached_dashboard(start_date, end_date, granularity, payload)
+        return payload
+    except Exception:
+        logger.exception("Live LinkedIn dashboard fetch failed; serving cached/stored data")
+        return _best_available_dashboard(start_date, end_date, granularity, ttl_seconds)
+    finally:
+        lock.release()

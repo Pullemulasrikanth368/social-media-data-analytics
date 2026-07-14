@@ -8,11 +8,11 @@ LinkedIn APIs feed the Django sync command. The sync stores one MongoDB snapshot
 
 ## Important Reporting Behavior
 
-LinkedIn is currently rejecting time-bound organization analytics for this app, so the backend uses lifetime snapshots as a fallback. To avoid cumulative charts, each new daily snapshot is converted into a daily delta by subtracting the previous stored snapshot.
+Time-bound organization analytics are now available for this app, so the backend requests **true daily rows** from LinkedIn for the selected date range. The dashboard endpoint (`?format=dashboard`) fetches the requested window live from LinkedIn and caches the normalized result in MongoDB (`dashboard_cache`, TTL `DASHBOARD_CACHE_TTL_SECONDS`, default 6h). Set `DASHBOARD_LIVE_FETCH=false` to serve only pre-synced snapshots instead of fetching live.
 
-This means accurate daily trend charts require the sync to run at least once per day. Historical daily data cannot be reconstructed unless LinkedIn allows the time-bound endpoints or you already have prior snapshots in MongoDB.
+If the time-bound endpoints ever stop returning daily rows, the backend automatically falls back to a lifetime snapshot and converts it into a daily delta by subtracting the previous stored snapshot (`metric_mode = daily_delta_from_lifetime_snapshot`).
 
-Run daily:
+The nightly sync is still useful for building history and warming the cache:
 
 ```bash
 ./venv/bin/python manage.py sync_linkedin

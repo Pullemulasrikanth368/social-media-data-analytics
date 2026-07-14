@@ -11,6 +11,14 @@ class AnalyticsConfig(AppConfig):
 
     def ready(self):
 
+        # Best-effort index creation; never block startup on a MongoDB outage.
+        try:
+            from .services.mongo_service import _ensure_indexes
+
+            _ensure_indexes()
+        except Exception:
+            pass
+
         # Prevent duplicate scheduler in development
         if os.environ.get('RUN_MAIN') == 'true':
 

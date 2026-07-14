@@ -6,24 +6,41 @@ from django.conf import settings
 from django.http import JsonResponse
 from django.shortcuts import redirect
 
+from .services.analytics_utils import parse_date
 from .services.mongo_service import get_all_analytics, get_dashboard_analytics, save_token
 
 logger = logging.getLogger(__name__)
 
 
+def _validate_date(value, field):
+    if value in (None, ""):
+        return None
+    try:
+        return parse_date(value).isoformat()
+    except (ValueError, TypeError):
+        raise ValueError(f"Invalid {field}; expected YYYY-MM-DD")
+
+
 def linkedin_analytics(request):
     try:
-        start_date = request.GET.get("start_date")
-        end_date = request.GET.get("end_date")
+        start_date = _validate_date(request.GET.get("start_date"), "start_date")
+        end_date = _validate_date(request.GET.get("end_date"), "end_date")
         response_format = request.GET.get("format", "snapshots")
+        granularity = request.GET.get("granularity", "DAY").upper()
+        if granularity not in ("DAY", "MONTH"):
+            granularity = "DAY"
 
         if response_format == "dashboard":
-            return JsonResponse(get_dashboard_analytics(start_date, end_date), safe=False)
+            return JsonResponse(
+                get_dashboard_analytics(start_date, end_date, granularity), safe=False
+            )
 
         return JsonResponse(get_all_analytics(start_date, end_date), safe=False)
-    except Exception as exc:
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    except Exception:
         logger.exception("Could not load LinkedIn analytics")
-        return JsonResponse({"error": str(exc)}, status=500)
+        return JsonResponse({"error": "Could not load LinkedIn analytics"}, status=500)
 
 
 def linkedin_login(request):
@@ -41,8 +58,8 @@ def linkedin_login(request):
     params = {
         "response_type": "code",
         "client_id": settings.LINKEDIN_CLIENT_ID,
-        "redirect_uri": "http://localhost:8001/api/callback/",
-        "state": "random_string_123",
+        "redirect_uri": "https://unnamed-anew-frays.ngrok-free.dev/api/callback",
+        "state": "random123",
         "scope": " ".join(scopes),
     }
     url_params = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)

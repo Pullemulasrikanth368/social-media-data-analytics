@@ -1,5 +1,5 @@
 var cc = DataStudioApp.createCommunityConnector();
-var API_URL = "https://dosysanalytics.dosystemsinc.com/api/linkedin-analytics/";
+var API_URL = "https://unnamed-anew-frays.ngrok-free.dev/api/linkedin-analytics/";
 
 var TEXT_FIELDS = [
   "row_type", "organization_id", "metric_mode", "segment_type", "segment",

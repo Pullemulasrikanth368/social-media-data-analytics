@@ -115,6 +115,13 @@ LINKEDIN_API_VERSION = os.getenv("LINKEDIN_API_VERSION", "202604")
 LINKEDIN_REQUEST_TIMEOUT = int(os.getenv("LINKEDIN_REQUEST_TIMEOUT", "20"))
 LINKEDIN_PAGE_SIZE = int(os.getenv("LINKEDIN_PAGE_SIZE", "100"))
 
+# Dashboard read behavior:
+#   DASHBOARD_LIVE_FETCH: when true, /api/linkedin-analytics/?format=dashboard fetches
+#   time-bound data live from LinkedIn for the requested window and caches it; when
+#   false, it serves only already-synced snapshots from MongoDB.
+DASHBOARD_LIVE_FETCH = os.getenv("DASHBOARD_LIVE_FETCH", "true").lower() in ("1", "true", "yes")
+DASHBOARD_CACHE_TTL_SECONDS = int(os.getenv("DASHBOARD_CACHE_TTL_SECONDS", str(6 * 3600)))
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 
