@@ -218,19 +218,28 @@ def merge_daily_rows(*row_groups):
     return output
 
 
-def aggregate_metrics(rows):
-    totals = {field: 0 for field in METRIC_FIELDS}
+def aggregate_metrics(rows, metric_fields=None, engagement_fn=None):
+    """Sum the given metric fields across rows and recompute derived metrics.
+
+    ``metric_fields``/``engagement_fn`` default to LinkedIn's set and formula so
+    existing callers are unchanged; other platforms pass their own (see the
+    platform registry) to aggregate the columns and engagement definition that
+    actually apply to them.
+    """
+    metric_fields = metric_fields or METRIC_FIELDS
+    engagement_fn = engagement_fn or engagement_rate
+    totals = {field: 0 for field in metric_fields}
     for row in rows or []:
-        for field in METRIC_FIELDS:
+        for field in metric_fields:
             totals[field] += safe_number(row.get(field))
     totals = {key: int(value) if float(value).is_integer() else value for key, value in totals.items()}
-    totals["engagement_rate"] = engagement_rate(totals)
+    totals["engagement_rate"] = engagement_fn(totals)
     totals["ctr_percent"] = ctr_percent(totals)
     totals["total_engagements"] = total_engagements(totals)
     return totals
 
 
-def aggregate_by_period(rows, period):
+def aggregate_by_period(rows, period, metric_fields=None, engagement_fn=None):
     buckets = defaultdict(list)
     for row in rows or []:
         day = parse_date(row.get("date"))
@@ -247,7 +256,7 @@ def aggregate_by_period(rows, period):
 
     output = []
     for key in sorted(buckets):
-        metrics = aggregate_metrics(buckets[key])
+        metrics = aggregate_metrics(buckets[key], metric_fields, engagement_fn)
         output.append({"period": key, "period_type": period, **metrics})
     return output
 
@@ -261,18 +270,19 @@ def rows_between(rows, start_date, end_date):
     ]
 
 
-def build_period_comparison(rows, current_start, current_end, label):
+def build_period_comparison(rows, current_start, current_end, label, metric_fields=None, engagement_fn=None):
+    metric_fields = metric_fields or METRIC_FIELDS
     current_start = parse_date(current_start)
     current_end = parse_date(current_end)
     period_days = (current_end - current_start).days + 1
     previous_end = current_start - timedelta(days=1)
     previous_start = previous_end - timedelta(days=period_days - 1)
 
-    current = aggregate_metrics(rows_between(rows, current_start, current_end))
-    previous = aggregate_metrics(rows_between(rows, previous_start, previous_end))
+    current = aggregate_metrics(rows_between(rows, current_start, current_end), metric_fields, engagement_fn)
+    previous = aggregate_metrics(rows_between(rows, previous_start, previous_end), metric_fields, engagement_fn)
 
     changes = {}
-    for field in (*METRIC_FIELDS, "engagement_rate"):
+    for field in (*metric_fields, "engagement_rate"):
         change = percent_change(current.get(field), previous.get(field))
         changes[f"{field}_change_pct"] = change
         changes[f"{field}_trend"] = trend_direction(change)
@@ -289,13 +299,15 @@ def build_period_comparison(rows, current_start, current_end, label):
     }
 
 
-def build_comparisons(rows, today=None):
+def build_comparisons(rows, today=None, metric_fields=None, engagement_fn=None):
     today = parse_date(today, utc_today())
     week_start = today - timedelta(days=today.weekday())
     month_start = today.replace(day=1)
     return {
-        "week_over_week": build_period_comparison(rows, week_start, today, "Current week vs previous week"),
-        "month_over_month": build_period_comparison(rows, month_start, today, "Current month vs previous month"),
+        "week_over_week": build_period_comparison(
+            rows, week_start, today, "Current week vs previous week", metric_fields, engagement_fn),
+        "month_over_month": build_period_comparison(
+            rows, month_start, today, "Current month vs previous month", metric_fields, engagement_fn),
     }
 
 
@@ -466,18 +478,28 @@ def top_post(posts, metric):
     return max(posts, key=lambda item: safe_number(item.get(metric)))
 
 
-def summarize_performance(rows, posts):
-    best_reach = top_post(posts, "impressions")
+def summarize_performance(rows, posts, reach_metric="impressions"):
+    """Executive-summary insights. ``reach_metric`` is the field used to rank the
+    "highest reach" post — ``impressions`` for LinkedIn, ``views`` for Instagram
+    (LinkedIn's impressions metric was removed from the Meta Graph API)."""
+    best_reach = top_post(posts, reach_metric)
     best_engagement = top_post(posts, "engagement_rate")
     active_day = top_post(rows, "engagement_rate")
     return {
         "highest_reach_post_id": best_reach.get("postId") or best_reach.get("post_id", ""),
-        "highest_reach_post_impressions": best_reach.get("impressions", 0),
+        "highest_reach_post_impressions": best_reach.get(reach_metric, 0),
         "highest_engagement_post_id": best_engagement.get("postId") or best_engagement.get("post_id", ""),
         "highest_engagement_rate": best_engagement.get("engagement_rate", 0),
         "best_content_type": best_engagement.get("contentType") or best_engagement.get("content_type", ""),
         "most_active_engagement_day": active_day.get("date", ""),
     }
+
+
+def tag_rows(rows, row_type, extra=None):
+    """Prefix each row with a ``row_type`` (and optional shared fields). Used to
+    assemble platform dashboard rows without duplicating the tagging logic."""
+    extra = extra or {}
+    return [{"row_type": row_type, **extra, **dict(row)} for row in rows or []]
 
 
 AUDIENCE_BREAKDOWNS = {

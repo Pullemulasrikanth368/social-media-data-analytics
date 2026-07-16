@@ -6,6 +6,7 @@ from django.conf import settings
 from django.http import JsonResponse
 from django.shortcuts import redirect
 
+from .services import registry
 from .services.analytics_utils import parse_date
 from .services.mongo_service import get_all_analytics, get_dashboard_analytics, save_token
 
@@ -21,7 +22,9 @@ def _validate_date(value, field):
         raise ValueError(f"Invalid {field}; expected YYYY-MM-DD")
 
 
-def linkedin_analytics(request):
+def _analytics_response(request, platform):
+    """Shared analytics endpoint for every platform. ``?format=dashboard`` serves
+    the connector-ready payload (fetch-through cached); otherwise raw snapshots."""
     try:
         start_date = _validate_date(request.GET.get("start_date"), "start_date")
         end_date = _validate_date(request.GET.get("end_date"), "end_date")
@@ -32,15 +35,111 @@ def linkedin_analytics(request):
 
         if response_format == "dashboard":
             return JsonResponse(
-                get_dashboard_analytics(start_date, end_date, granularity), safe=False
+                get_dashboard_analytics(platform, start_date, end_date, granularity), safe=False
             )
 
-        return JsonResponse(get_all_analytics(start_date, end_date), safe=False)
+        return JsonResponse(get_all_analytics(start_date, end_date, platform), safe=False)
     except ValueError as exc:
         return JsonResponse({"error": str(exc)}, status=400)
     except Exception:
-        logger.exception("Could not load LinkedIn analytics")
-        return JsonResponse({"error": "Could not load LinkedIn analytics"}, status=500)
+        logger.exception("Could not load %s analytics", platform)
+        return JsonResponse({"error": f"Could not load {platform} analytics"}, status=500)
+
+
+def linkedin_analytics(request):
+    return _analytics_response(request, "linkedin")
+
+
+def instagram_analytics(request):
+    return _analytics_response(request, "instagram")
+
+
+def platform_analytics(request, platform):
+    """Generic, extensible route: /api/<platform>/analytics/."""
+    if not registry.is_supported(platform):
+        return JsonResponse({"error": f"Unsupported platform: {platform}"}, status=404)
+    return _analytics_response(request, registry.normalize_platform(platform))
+
+
+def instagram_login(request):
+    """Begin the Facebook-Login (for Business) flow to mint a user token that can
+    read Instagram insights. Redirects to Facebook's OAuth dialog; Facebook then
+    calls back to META_REDIRECT_URI with a ?code=."""
+    version = settings.META_GRAPH_API_VERSION
+    scopes = [
+        "instagram_basic",
+        "instagram_manage_insights",
+        "pages_show_list",
+        "pages_read_engagement",
+    ]
+    params = {
+        "client_id": settings.META_APP_ID,
+        "redirect_uri": settings.META_REDIRECT_URI,
+        "state": "instagram_oauth",
+        "response_type": "code",
+        "scope": ",".join(scopes),
+    }
+    url = f"https://www.facebook.com/{version}/dialog/oauth?{urllib.parse.urlencode(params)}"
+    return redirect(url)
+
+
+def instagram_callback(request):
+    """Exchange the OAuth code for a short-lived token, upgrade it to a ~60-day
+    long-lived token, persist it (platform=instagram), and report the IG Business
+    Account id(s) linked to the user's Page(s)."""
+    error = request.GET.get("error")
+    if error:
+        return JsonResponse({
+            "status": "error",
+            "error_type": "instagram_callback_error",
+            "details": {"error": error, "description": request.GET.get("error_description")},
+        }, status=400)
+
+    code = request.GET.get("code")
+    if not code:
+        return JsonResponse({"status": "error", "message": "No authorization code provided by Facebook."}, status=400)
+
+    version = settings.META_GRAPH_API_VERSION
+    try:
+        token_resp = requests.get(
+            f"https://graph.facebook.com/{version}/oauth/access_token",
+            params={
+                "client_id": settings.META_APP_ID,
+                "client_secret": settings.META_APP_SECRET,
+                "redirect_uri": settings.META_REDIRECT_URI,
+                "code": code,
+            },
+            timeout=15,
+        )
+        short_lived = token_resp.json()
+        if token_resp.status_code != 200 or "access_token" not in short_lived:
+            logger.error("Instagram token exchange failed: %s", short_lived)
+            return JsonResponse({
+                "status": "error",
+                "message": "Facebook rejected the token exchange.",
+                "facebook_response": short_lived,
+                "debug_info": {"sent_redirect_uri": settings.META_REDIRECT_URI},
+            }, status=token_resp.status_code)
+
+        # Upgrade to a long-lived token and persist it, then discover the account.
+        from .services.instagram_auth import discover_ig_business_account, exchange_long_lived_token
+
+        long_lived = exchange_long_lived_token(short_lived["access_token"]) or short_lived["access_token"]
+        accounts = discover_ig_business_account(long_lived)
+
+        return JsonResponse({
+            "status": "success",
+            "message": "Instagram access token generated and saved successfully.",
+            "ig_business_accounts": accounts,
+            "next_step": "Copy an ig_business_account_id into INSTAGRAM_BUSINESS_ACCOUNT_ID in .env",
+        })
+    except requests.exceptions.RequestException as exc:
+        logger.exception("Connection error during Instagram token exchange")
+        return JsonResponse({
+            "status": "error",
+            "message": "Could not connect to Facebook servers.",
+            "details": str(exc),
+        }, status=500)
 
 
 def linkedin_login(request):

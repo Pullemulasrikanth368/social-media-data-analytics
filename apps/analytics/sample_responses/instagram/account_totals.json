@@ -1,0 +1,9 @@
+{
+  "data": [
+    {"name": "reach", "period": "day", "title": "Reach", "total_value": {"value": 2000}},
+    {"name": "views", "period": "day", "title": "Views", "total_value": {"value": 6500}},
+    {"name": "total_interactions", "period": "day", "title": "Content Interactions", "total_value": {"value": 330}},
+    {"name": "accounts_engaged", "period": "day", "title": "Accounts Engaged", "total_value": {"value": 260}},
+    {"name": "follows_and_unfollows", "period": "day", "title": "Follows and Unfollows", "total_value": {"value": 45}}
+  ]
+}

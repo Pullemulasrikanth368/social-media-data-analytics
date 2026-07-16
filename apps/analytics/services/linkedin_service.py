@@ -1,31 +1,34 @@
 import logging
-import time
 from urllib.parse import quote, urlencode
 
-import requests
 from django.conf import settings
 
 from .analytics_utils import linkedin_time_interval_params, linkedin_time_intervals
+from .base_service import AnalyticsAPIError, BaseAnalyticsClient
 
 logger = logging.getLogger(__name__)
 DEFAULT_LINKEDIN_API_VERSION = "202604"
 
 
-class LinkedInAPIError(Exception):
+class LinkedInAPIError(AnalyticsAPIError):
     pass
 
 
-class LinkedInService:
+class LinkedInService(BaseAnalyticsClient):
+    error_class = LinkedInAPIError
+
     REST_BASE_URL = "https://api.linkedin.com/rest"
     V2_BASE_URL = "https://api.linkedin.com/v2"
 
     def __init__(self, access_token=None, org_id=None, api_version=None):
-        self.access_token = access_token or self._latest_saved_access_token() or settings.LINKEDIN_ACCESS_TOKEN
+        super().__init__(
+            access_token=access_token or self._latest_saved_access_token() or settings.LINKEDIN_ACCESS_TOKEN,
+            timeout=getattr(settings, "LINKEDIN_REQUEST_TIMEOUT", 20),
+            page_size=getattr(settings, "LINKEDIN_PAGE_SIZE", 100),
+        )
         self.org_id = org_id or settings.LINKEDIN_ORG_ID
         configured_version = api_version or getattr(settings, "LINKEDIN_API_VERSION", DEFAULT_LINKEDIN_API_VERSION)
         self.api_version = self._normalize_api_version(configured_version)
-        self.timeout = getattr(settings, "LINKEDIN_REQUEST_TIMEOUT", 20)
-        self.page_size = getattr(settings, "LINKEDIN_PAGE_SIZE", 100)
 
     @staticmethod
     def _latest_saved_access_token():
@@ -80,8 +83,7 @@ class LinkedInService:
             return True
         return False
 
-    @staticmethod
-    def _is_privacy_cost_error(response):
+    def _should_not_retry(self, response):
         # LinkedIn's differential-privacy budget error. It is NOT a transient rate
         # limit: it only clears at a future refresh window, so retrying wastes time
         # and consumes more budget. Fail fast and let the caller degrade gracefully.
@@ -93,45 +95,6 @@ class LinkedInService:
             return response.json().get("code") == "TABLE_MAX_PRIVACY_COST_EXCEEDED"
         except ValueError:
             return False
-
-    def _request(self, method, url, params=None, retries=3):
-        token_refreshed = False
-        for attempt in range(retries):
-            response = requests.request(
-                method,
-                url,
-                headers=self.headers(),
-                params=params,
-                timeout=self.timeout,
-            )
-
-            # Privacy-budget exhaustion: do not retry.
-            if self._is_privacy_cost_error(response):
-                logger.warning("LinkedIn privacy budget exhausted (no retry): %s", response.text[:200])
-                raise LinkedInAPIError(f"LinkedIn API returned {response.status_code}: {response.text[:300]}")
-
-            if response.status_code in (429, 500, 502, 503, 504) and attempt < retries - 1:
-                retry_after = response.headers.get("Retry-After")
-                sleep_for = int(retry_after) if retry_after and retry_after.isdigit() else 2 ** attempt
-                logger.warning("LinkedIn API retry in %s seconds: %s", sleep_for, response.text[:300])
-                time.sleep(sleep_for)
-                continue
-
-            # A revoked/expired token surfaces as 401; try one refresh then retry.
-            if response.status_code == 401 and not token_refreshed:
-                token_refreshed = True
-                if self._refresh_access_token():
-                    continue
-
-            if not response.ok:
-                logger.error("LinkedIn API error %s: %s", response.status_code, response.text[:1000])
-                raise LinkedInAPIError(f"LinkedIn API returned {response.status_code}: {response.text[:300]}")
-
-            if not response.content:
-                return {}
-            return response.json()
-
-        raise LinkedInAPIError("LinkedIn API request failed after retries")
 
     def _get(self, path, params=None, use_rest=True):
         base_url = self.REST_BASE_URL if use_rest else self.V2_BASE_URL

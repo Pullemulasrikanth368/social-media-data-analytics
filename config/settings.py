@@ -106,6 +106,10 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 MONGO_URI = os.getenv("MONGO_URI")
+# Shared multi-platform analytics database. Keeps its historical name by default
+# so existing LinkedIn data is not orphaned; rows carry a ``platform`` field.
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "linkedin_db")
+
 LINKEDIN_CLIENT_ID = os.getenv("LINKEDIN_CLIENT_ID")
 LINKEDIN_CLIENT_SECRET = os.getenv("LINKEDIN_CLIENT_SECRET")
 LINKEDIN_REFRESH_TOKEN = os.getenv("LINKEDIN_REFRESH_TOKEN")
@@ -121,6 +125,27 @@ LINKEDIN_PAGE_SIZE = int(os.getenv("LINKEDIN_PAGE_SIZE", "100"))
 #   false, it serves only already-synced snapshots from MongoDB.
 DASHBOARD_LIVE_FETCH = os.getenv("DASHBOARD_LIVE_FETCH", "true").lower() in ("1", "true", "yes")
 DASHBOARD_CACHE_TTL_SECONDS = int(os.getenv("DASHBOARD_CACHE_TTL_SECONDS", str(6 * 3600)))
+
+# Instagram / Meta Graph API (Facebook-Login path). Tokens are stored in MongoDB
+# (tokens collection, platform="instagram"); .env provides only the bootstrap
+# access token and the app credentials. See docs/instagram-insights-analysis.md.
+META_APP_ID = os.getenv("META_APP_ID")
+META_APP_SECRET = os.getenv("META_APP_SECRET")
+META_REDIRECT_URI = os.getenv("META_REDIRECT_URI")
+META_GRAPH_API_VERSION = os.getenv("META_GRAPH_API_VERSION", "v24.0")
+META_REQUEST_TIMEOUT = int(os.getenv("META_REQUEST_TIMEOUT", "20"))
+META_PAGE_SIZE = int(os.getenv("META_PAGE_SIZE", "100"))
+INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")
+INSTAGRAM_BUSINESS_ACCOUNT_ID = os.getenv("INSTAGRAM_BUSINESS_ACCOUNT_ID")
+# Proactively re-exchange the long-lived Instagram token once it is within this
+# many days of its ~60-day expiry (Meta allows extending a still-valid token).
+INSTAGRAM_TOKEN_REFRESH_LEAD_DAYS = int(os.getenv("INSTAGRAM_TOKEN_REFRESH_LEAD_DAYS", "7"))
+
+# Platforms the nightly scheduler should sync. Comma-separated; defaults to
+# LinkedIn only until the Instagram account/token setup is confirmed live.
+ANALYTICS_SYNC_PLATFORMS = [
+    p.strip() for p in os.getenv("ANALYTICS_SYNC_PLATFORMS", "linkedin").split(",") if p.strip()
+]
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 

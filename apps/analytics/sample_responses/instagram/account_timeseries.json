@@ -1,0 +1,14 @@
+{
+  "data": [
+    {
+      "name": "reach",
+      "period": "day",
+      "title": "Reach",
+      "id": "17841444927692295/insights/reach/day",
+      "values": [
+        {"value": 1000, "end_time": "2026-07-01T07:00:00+0000"},
+        {"value": 1200, "end_time": "2026-07-02T07:00:00+0000"}
+      ]
+    }
+  ]
+}

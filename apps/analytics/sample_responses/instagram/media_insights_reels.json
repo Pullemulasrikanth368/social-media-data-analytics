@@ -1,0 +1,12 @@
+{
+  "data": [
+    {"name": "reach", "period": "lifetime", "values": [{"value": 5000}]},
+    {"name": "views", "period": "lifetime", "values": [{"value": 12000}]},
+    {"name": "likes", "period": "lifetime", "values": [{"value": 200}]},
+    {"name": "comments", "period": "lifetime", "values": [{"value": 15}]},
+    {"name": "shares", "period": "lifetime", "values": [{"value": 60}]},
+    {"name": "saved", "period": "lifetime", "values": [{"value": 90}]},
+    {"name": "total_interactions", "period": "lifetime", "values": [{"value": 365}]},
+    {"name": "ig_reels_avg_watch_time", "period": "lifetime", "values": [{"value": 4200}]}
+  ]
+}

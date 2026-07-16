@@ -1,0 +1,11 @@
+{
+  "data": [
+    {"name": "reach", "period": "lifetime", "values": [{"value": 800}]},
+    {"name": "views", "period": "lifetime", "values": [{"value": 2000}]},
+    {"name": "likes", "period": "lifetime", "values": [{"value": 50}]},
+    {"name": "comments", "period": "lifetime", "values": [{"value": 5}]},
+    {"name": "shares", "period": "lifetime", "values": [{"value": 10}]},
+    {"name": "saved", "period": "lifetime", "values": [{"value": 30}]},
+    {"name": "total_interactions", "period": "lifetime", "values": [{"value": 95}]}
+  ]
+}
