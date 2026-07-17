@@ -383,7 +383,7 @@ def _dedupe_post_rows(rows):
 
 def _dashboard_payload(platform, organization_id, start_date, end_date, daily_rows, audience_rows,
                        post_rows, comparisons, performance_insights, followers, snapshots,
-                       dashboard_rows=None, overview=None):
+                       dashboard_rows=None, overview=None, sync_warnings=None):
     metric_fields, engagement_fn = registry.get_metric_config(platform)
     if overview is None:
         overview = aggregate_metrics(daily_rows, metric_fields, engagement_fn)
@@ -406,6 +406,7 @@ def _dashboard_payload(platform, organization_id, start_date, end_date, daily_ro
         "post_analytics": post_rows,
         "dashboard_rows": dashboard_rows,
         "snapshots": snapshots,
+        "sync_warnings": list(sync_warnings or []),
     }
 
 
@@ -454,7 +455,7 @@ def _store_cached_dashboard(platform, account_id, start_date, end_date, granular
     )
 
 
-def _dashboard_from_fresh(data, start_date, end_date, platform):
+def _dashboard_from_fresh(data, start_date, end_date, platform, sync_warnings=None):
     """Build a dashboard payload from a single freshly collected analytics doc.
 
     Because it comes from one collection run there is no cross-snapshot
@@ -483,6 +484,7 @@ def _dashboard_from_fresh(data, start_date, end_date, platform):
         # row types (reel/story) the generic builder can't reconstruct.
         dashboard_rows=data.get("dashboard_rows"),
         overview=data.get("overview"),
+        sync_warnings=sync_warnings,
     )
 
 
@@ -585,14 +587,26 @@ def get_dashboard_analytics(platform=None, start_date=None, end_date=None, granu
         if cached is not None:
             return cached
 
+        # Every degraded endpoint inside the collector (`_fetch_or_empty`) calls
+        # this instead of only logging, so callers can see what silently failed
+        # without digging through Django logs.
+        warnings = []
         collector = registry.get_collector(platform)
-        data = collector(start_date, end_date, granularity)
+        data = collector(start_date, end_date, granularity, warn=warnings.append)
         save_analytics(data, platform=platform)
-        payload = _dashboard_from_fresh(data, start_date, end_date, platform)
+        # Preserve order, drop exact duplicates (the same endpoint can fail
+        # identically across multiple date-chunked requests).
+        deduped_warnings = list(dict.fromkeys(warnings))
+        payload = _dashboard_from_fresh(data, start_date, end_date, platform, sync_warnings=deduped_warnings)
         _store_cached_dashboard(platform, account_id, start_date, end_date, granularity, payload)
         return payload
-    except Exception:
+    except Exception as exc:
         logger.exception("Live %s dashboard fetch failed; serving cached/stored data", platform)
-        return _best_available_dashboard(platform, account_id, start_date, end_date, granularity, ttl_seconds)
+        fallback = dict(_best_available_dashboard(
+            platform, account_id, start_date, end_date, granularity, ttl_seconds))
+        fallback["sync_warnings"] = list(fallback.get("sync_warnings") or []) + [
+            f"Live {platform} dashboard fetch failed ({exc}); serving best-available cached/stored data"
+        ]
+        return fallback
     finally:
         lock.release()
