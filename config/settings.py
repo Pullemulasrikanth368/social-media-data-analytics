@@ -115,6 +115,12 @@ LINKEDIN_CLIENT_SECRET = os.getenv("LINKEDIN_CLIENT_SECRET")
 LINKEDIN_REFRESH_TOKEN = os.getenv("LINKEDIN_REFRESH_TOKEN")
 LINKEDIN_ACCESS_TOKEN = os.getenv("LINKEDIN_ACCESS_TOKEN")
 LINKEDIN_ORG_ID = os.getenv("LINKEDIN_ORG_ID")
+# OAuth callback URL. Must match EXACTLY the "Authorized redirect URL" registered
+# in the LinkedIn Developer Portal, and is sent identically in both the login
+# request and the token exchange.
+LINKEDIN_REDIRECT_URI = os.getenv(
+    "LINKEDIN_REDIRECT_URI", "https://dosysanalytics.dosystemsinc.com/api/callback"
+)
 LINKEDIN_API_VERSION = os.getenv("LINKEDIN_API_VERSION", "202604")
 LINKEDIN_REQUEST_TIMEOUT = int(os.getenv("LINKEDIN_REQUEST_TIMEOUT", "20"))
 LINKEDIN_PAGE_SIZE = int(os.getenv("LINKEDIN_PAGE_SIZE", "100"))

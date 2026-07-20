@@ -157,7 +157,7 @@ def linkedin_login(request):
     params = {
         "response_type": "code",
         "client_id": settings.LINKEDIN_CLIENT_ID,
-        "redirect_uri": "https://unnamed-anew-frays.ngrok-free.dev/api/callback",
+        "redirect_uri": settings.LINKEDIN_REDIRECT_URI,
         "state": "random123",
         "scope": " ".join(scopes),
     }
@@ -186,7 +186,7 @@ def linkedin_callback(request):
             "message": "No authorization code provided by LinkedIn.",
         }, status=400)
 
-    redirect_uri = "http://localhost:8001/api/callback/"
+    redirect_uri = settings.LINKEDIN_REDIRECT_URI
     payload = {
         "grant_type": "authorization_code",
         "code": code,
@@ -216,12 +216,22 @@ def linkedin_callback(request):
             }, status=response.status_code)
 
         save_token(token_data)
+        refresh_token = token_data.get("refresh_token")
         return JsonResponse({
             "status": "success",
             "message": "Access token generated and saved successfully",
             "access_token": token_data.get("access_token"),
             "expires_in": token_data.get("expires_in"),
             "scope": token_data.get("scope"),
+            "refresh_token": refresh_token,
+            "refresh_token_expires_in": token_data.get("refresh_token_expires_in"),
+            "refresh_token_issued": bool(refresh_token),
+            "note": (
+                "If refresh_token_issued is false, this LinkedIn app is not approved "
+                "for refresh tokens — you must re-run /api/login/ before the access "
+                "token expires. Do NOT re-authorize again now; each new login revokes "
+                "this token."
+            ),
         })
 
     except requests.exceptions.RequestException as exc:
