@@ -156,6 +156,22 @@ def get_latest_refresh_token(platform=None):
     return token_doc.get("refresh_token")
 
 
+def get_seen_post_ids(platform=None):
+    """Post ids seen the last time the new-post poller ran, as a ``set``."""
+    doc = _collection("post_markers").find_one(
+        {"platform": registry.normalize_platform(platform)}, {"_id": 0})
+    return set(doc.get("post_ids", [])) if doc else set()
+
+
+def set_seen_post_ids(post_ids, platform=None):
+    """Persist the current set of post ids for new-post detection next run."""
+    _collection("post_markers").update_one(
+        {"platform": registry.normalize_platform(platform)},
+        {"$set": {"post_ids": list(post_ids), "updated_at": _utcnow()}},
+        upsert=True,
+    )
+
+
 def _latest_before_today(organization_id, today, platform=None):
     query = {**_platform_query(platform), "date": {"$lt": today}}
     if organization_id:

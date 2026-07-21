@@ -142,6 +142,147 @@ def instagram_callback(request):
         }, status=500)
 
 
+def _linkedin_post_url(post_id):
+    """A viewable LinkedIn URL for a share/ugcPost URN, or "" if not a URN."""
+    return f"https://www.linkedin.com/feed/update/{post_id}" if str(post_id).startswith("urn:li:") else ""
+
+
+def _post_urn_id(post_id):
+    """Numeric id embedded in a LinkedIn URN (e.g. urn:li:share:748... -> 748...).
+    It increases monotonically with time, so it orders same-day posts correctly.
+    Returns 0 when no numeric id can be parsed."""
+    tail = str(post_id).rsplit(":", 1)[-1]
+    return int(tail) if tail.isdigit() else 0
+
+
+def _reject_without_api_key(request):
+    """Return a JsonResponse to send back when the request is not authorized, or
+    ``None`` when a valid ``X-API-Key`` header (or ``?api_key=``) is present."""
+    provided = request.headers.get("X-API-Key") or request.GET.get("api_key")
+    if not settings.ANALYTICS_API_KEYS:
+        logger.error("ANALYTICS_API_KEYS is not set; refusing key-protected request")
+        return JsonResponse(
+            {"status": "error", "message": "API access is not configured."}, status=503
+        )
+    if provided not in settings.ANALYTICS_API_KEYS:
+        return JsonResponse(
+            {"status": "error", "message": "Invalid or missing API key."}, status=401
+        )
+    return None
+
+
+def linkedin_new_posts(request):
+    """Read-only feed of recently-published LinkedIn posts for external websites.
+
+    Protected by ``X-API-Key``. Unlike ``/api/linkedin/posts/`` this has NO side
+    effects: it never triggers a sync and never touches the internal new-post
+    baseline, so external consumers can poll it freely without disturbing the
+    dashboard poller. "New" = published on/after ``?since=YYYY-MM-DD``; if
+    ``since`` is omitted it defaults to the last ``?days=N`` days (default 7)."""
+    unauthorized = _reject_without_api_key(request)
+    if unauthorized:
+        return unauthorized
+
+    from datetime import date, timedelta
+
+    from .services.analytics_utils import normalize_post_rows
+    from .services.linkedin_service import LinkedInAPIError, LinkedInService
+
+    try:
+        since = request.GET.get("since")
+        if since:
+            cutoff = _validate_date(since, "since")[:10]
+        else:
+            try:
+                days = max(int(request.GET.get("days", "7")), 0)
+            except ValueError:
+                days = 7
+            cutoff = (date.today() - timedelta(days=days)).isoformat()
+    except ValueError as exc:
+        return JsonResponse({"status": "error", "message": str(exc)}, status=400)
+
+    try:
+        metadata = LinkedInService().get_organization_posts()
+    except LinkedInAPIError as exc:
+        logger.error("Could not fetch LinkedIn posts for external feed: %s", exc)
+        return JsonResponse(
+            {"status": "error", "message": "Could not fetch LinkedIn posts."}, status=502
+        )
+
+    posts = normalize_post_rows([], metadata.get("elements", []))
+    new_posts = [p for p in posts if p.get("postDate") and p["postDate"] >= cutoff]
+    # Sort newest-first. Primary key: publish date. Tiebreaker for same-day posts:
+    # the numeric id inside the share URN, which increases monotonically with time.
+    new_posts.sort(key=lambda p: (p.get("postDate", ""), _post_urn_id(p.get("post_id"))), reverse=True)
+    for post in new_posts:
+        post["post_url"] = _linkedin_post_url(post.get("post_id"))
+
+    return JsonResponse({
+        "status": "success",
+        "since": cutoff,
+        "count": len(new_posts),
+        # Convenience: the single most recent post (or null if none in the window).
+        "latest_post": new_posts[0] if new_posts else None,
+        "posts": new_posts,
+    })
+
+
+def linkedin_posts(request):
+    """Return the organization's latest posts and flag any published since the
+    last check.
+
+    LinkedIn has no push/webhook for new posts, so this is a *poll*: call it on a
+    schedule (dashboard auto-refresh or cron). When a new post is detected it
+    triggers a fresh analytics sync so the dashboard reflects the post, then
+    reports the new post(s). ``?refresh=false`` skips the sync (detect only)."""
+    from .services.analytics_utils import normalize_post_rows
+    from .services.linkedin_service import LinkedInAPIError, LinkedInService
+    from .services.mongo_service import get_seen_post_ids, set_seen_post_ids
+
+    try:
+        linkedin = LinkedInService()
+        metadata = linkedin.get_organization_posts()
+    except LinkedInAPIError as exc:
+        logger.error("Could not fetch LinkedIn posts: %s", exc)
+        return JsonResponse(
+            {"status": "error", "message": "Could not fetch LinkedIn posts.", "details": str(exc)},
+            status=502,
+        )
+
+    posts = normalize_post_rows([], metadata.get("elements", []))
+    for post in posts:
+        post["post_url"] = _linkedin_post_url(post.get("post_id"))
+    current_ids = [p["post_id"] for p in posts if p.get("post_id")]
+
+    seen = get_seen_post_ids("linkedin")
+    # On the very first run everything looks "new"; only treat ids as new once we
+    # have a prior baseline, so we don't trigger a needless sync on cold start.
+    new_posts = [p for p in posts if p.get("post_id") not in seen] if seen else []
+
+    analytics_refreshed = False
+    if new_posts and request.GET.get("refresh", "true").lower() != "false":
+        try:
+            from .services.analytics_sync import collect_linkedin_analytics
+            from .services.mongo_service import save_analytics
+
+            save_analytics(collect_linkedin_analytics(linkedin=linkedin))
+            analytics_refreshed = True
+        except Exception:
+            logger.exception("Failed to refresh analytics after detecting a new LinkedIn post")
+
+    set_seen_post_ids(current_ids, "linkedin")
+
+    return JsonResponse({
+        "status": "success",
+        "post_count": len(posts),
+        "new_post_count": len(new_posts),
+        "has_new_posts": bool(new_posts),
+        "analytics_refreshed": analytics_refreshed,
+        "new_posts": new_posts,
+        "posts": posts,
+    })
+
+
 def linkedin_login(request):
     auth_base_url = "https://www.linkedin.com/oauth/v2/authorization"
     scopes = [
